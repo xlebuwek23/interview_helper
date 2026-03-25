@@ -24,7 +24,7 @@ _MODIFIER_MAP = {
 
 # Маппинг строковых клавиш → виртуальные коды (VK_*)
 _VK_MAP = {
-    **{chr(c): c for c in range(0x41, 0x5B)},  # A-Z → 0x41-0x5A
+    **{chr(c).lower(): c for c in range(0x41, 0x5B)},  # a-z → 0x41-0x5A
     **{str(c - 0x30): c for c in range(0x30, 0x3A)},  # 0-9 → 0x30-0x39
     **{f"f{i}": 0x70 + i - 1 for i in range(1, 13)},  # F1-F12 → 0x70-0x7B
     "space": 0x20,

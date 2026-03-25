@@ -4,9 +4,11 @@
 """
 
 import logging
+import signal
 import sys
 from logging.handlers import RotatingFileHandler
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from utils.config import load_settings, save_settings
@@ -102,6 +104,14 @@ def main() -> None:
     controller.start()
 
     logger.info("Interview Helper: готов к работе")
+
+    # Ctrl+C — корректное завершение из консоли.
+    # Qt event loop блокирует обработку SIGINT в Python,
+    # поэтому нужен таймер, который периодически отдаёт управление интерпретатору.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    sigint_timer = QTimer()
+    sigint_timer.timeout.connect(lambda: None)  # даёт Python обработать сигнал
+    sigint_timer.start(200)
 
     # Запускаем Qt event loop
     exit_code = app.exec()

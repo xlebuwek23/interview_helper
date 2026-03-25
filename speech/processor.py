@@ -1,9 +1,10 @@
-import asyncio
 import logging
 import queue
 import threading
 
-from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
+from deepgram import DeepgramClient
+from deepgram.core.events import EventType
+from deepgram.listen.v1.types import ListenV1Results
 from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ class SpeechProcessor(threading.Thread):
     """Отправляет аудио-чанки в Deepgram WebSocket, получает транскрипцию.
 
     Читает из audio_queue (bytes, linear16, 16kHz, mono),
-    отправляет в Deepgram streaming API.
+    отправляет в Deepgram streaming API v1.
     Результаты передаёт через Qt-сигналы (interim_result, final_result).
     """
 
@@ -39,7 +40,6 @@ class SpeechProcessor(threading.Thread):
         self.language = language
         self.signals = SpeechSignals()
         self._stop_event = threading.Event()
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     def stop(self) -> None:
         """Сигнализирует потоку остановиться."""
@@ -47,69 +47,71 @@ class SpeechProcessor(threading.Thread):
 
     def run(self) -> None:
         logger.info("SpeechProcessor: запуск")
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._process())
+            self._process()
         except Exception as e:
             logger.error("SpeechProcessor: критическая ошибка: %s", e)
             self.signals.error.emit(str(e))
         finally:
-            self._loop.close()
             logger.info("SpeechProcessor: остановлен")
 
-    async def _process(self) -> None:
-        """Основной цикл: подключение к Deepgram и отправка аудио."""
-        deepgram = DeepgramClient(self.api_key)
+    def _process(self) -> None:
+        """Основной цикл: подключение к Deepgram v1 (streaming STT) и отправка аудио."""
+        client = DeepgramClient(api_key=self.api_key)
 
-        dg_connection = deepgram.listen.websocket.v("1")
-
-        # Обработчик транскрипции
-        def on_message(_self, result, **kwargs):
-            try:
-                transcript = result.channel.alternatives[0].transcript
-                if not transcript:
-                    return
-
-                if result.is_final:
-                    logger.debug("Финальный текст: %s", transcript)
-                    self.signals.final_result.emit(transcript)
-                else:
-                    self.signals.interim_result.emit(transcript)
-            except (IndexError, AttributeError) as e:
-                logger.warning("Ошибка парсинга результата Deepgram: %s", e)
-
-        def on_error(_self, error, **kwargs):
-            logger.error("Deepgram ошибка: %s", error)
-            self.signals.error.emit(str(error))
-
-        dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-        dg_connection.on(LiveTranscriptionEvents.Error, on_error)
-
-        options = LiveOptions(
+        with client.listen.v1.connect(
             model="nova-3",
             language=self.language,
             encoding="linear16",
-            sample_rate=16000,
-            channels=1,
-            interim_results=True,
-            punctuate=True,
-        )
+            sample_rate="16000",
+            interim_results="true",
+            punctuate="true",
+            endpointing="300",
+        ) as connection:
 
-        if not dg_connection.start(options):
-            logger.error("Не удалось подключиться к Deepgram")
-            self.signals.error.emit("Не удалось подключиться к Deepgram")
-            return
+            # Обработчик результатов транскрипции
+            def on_message(message):
+                # V1 отправляет разные типы (Metadata, Results, SpeechStarted и др.)
+                if not isinstance(message, ListenV1Results):
+                    return
 
-        logger.info("SpeechProcessor: подключён к Deepgram")
-
-        try:
-            while not self._stop_event.is_set():
                 try:
-                    chunk = self.audio_queue.get(timeout=0.1)
-                    dg_connection.send(chunk)
-                except queue.Empty:
-                    continue
-        finally:
-            dg_connection.finish()
-            logger.info("SpeechProcessor: соединение с Deepgram закрыто")
+                    transcript = message.channel.alternatives[0].transcript
+                    if not transcript or not transcript.strip():
+                        return
+
+                    if message.is_final:
+                        logger.debug("Финальный текст: %s", transcript)
+                        self.signals.final_result.emit(transcript)
+                    else:
+                        self.signals.interim_result.emit(transcript)
+
+                except (AttributeError, IndexError) as e:
+                    logger.warning("Ошибка парсинга результата Deepgram: %s", e)
+
+            def on_error(error):
+                logger.error("Deepgram ошибка: %s", error)
+                self.signals.error.emit(str(error))
+
+            connection.on(EventType.MESSAGE, on_message)
+            connection.on(EventType.ERROR, on_error)
+
+            # start_listening() блокирует поток (recv-loop),
+            # поэтому запускаем его в фоне, а аудио отправляем в текущем потоке
+            recv_thread = threading.Thread(
+                target=connection.start_listening, daemon=True
+            )
+            recv_thread.start()
+            logger.info("SpeechProcessor: подключён к Deepgram")
+
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        chunk = self.audio_queue.get(timeout=0.1)
+                        connection.send_media(chunk)
+                    except queue.Empty:
+                        continue
+            finally:
+                connection.send_close_stream()
+                recv_thread.join(timeout=3)
+                logger.info("SpeechProcessor: соединение с Deepgram закрыто")

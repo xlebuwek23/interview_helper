@@ -4,13 +4,13 @@ import logging
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QFont, QMouseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QTextEdit,
-    QScrollArea,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,11 +102,27 @@ class OverlayWindow(QWidget):
             }
         """)
 
+        self._close_btn = QPushButton("\u2715")
+        self._close_btn.setFixedSize(28, 28)
+        self._close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                color: #ff4444;
+            }
+        """)
+        self._close_btn.clicked.connect(self._on_close)
+
         status_layout.addWidget(self._status_label)
         status_layout.addWidget(self._mode_label)
         status_layout.addWidget(self._error_label)
         status_layout.addStretch()
         status_layout.addWidget(self._settings_btn)
+        status_layout.addWidget(self._close_btn)
 
         main_layout.addLayout(status_layout)
 
@@ -228,6 +244,10 @@ class OverlayWindow(QWidget):
         """Возвращает текущую позицию окна для сохранения."""
         pos = self.pos()
         return pos.x(), pos.y()
+
+    def _on_close(self) -> None:
+        """Закрытие приложения через кнопку ✕."""
+        QApplication.instance().quit()
 
     @property
     def settings_button(self) -> QPushButton:
