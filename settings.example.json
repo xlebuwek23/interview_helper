@@ -1,0 +1,30 @@
+{
+  "api": {
+    "anthropic_key": "",
+    "anthropic_model": "claude-haiku-4-5-20251001",
+    "deepgram_key": "",
+    "deepgram_language": "ru"
+  },
+  "audio": {
+    "device": "default",
+    "silence_timeout_sec": 3
+  },
+  "hotkeys": {
+    "mute_toggle": "ctrl+alt+shift+m",
+    "send_to_llm": "ctrl+alt+shift+s",
+    "mode_toggle": "ctrl+alt+shift+a",
+    "show_hide": "ctrl+alt+shift+h"
+  },
+  "ui": {
+    "opacity": 0.85,
+    "width": 400,
+    "height": 300,
+    "position_x": null,
+    "position_y": null,
+    "font_size": 14
+  },
+  "llm": {
+    "context_history_count": 5,
+    "system_prompt": "Ты помощник на собеседовании. Отвечай кратко, структурировано, в стиле устной речи. Язык — русский. Давай суть за 3-5 предложений."
+  }
+}
