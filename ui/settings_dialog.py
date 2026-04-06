@@ -1,3 +1,4 @@
+import ctypes
 import logging
 
 from PyQt6.QtCore import Qt
@@ -20,6 +21,11 @@ from PyQt6.QtWidgets import (
 )
 
 logger = logging.getLogger(__name__)
+
+# WDA_EXCLUDEFROMCAPTURE — скрытие окна от screen capture.
+# Константа дублируется локально: импорт из overlay.py создал бы
+# циклическую зависимость (overlay → controller → settings_dialog → overlay).
+_WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
 class SettingsDialog(QDialog):
@@ -46,6 +52,19 @@ class SettingsDialog(QDialog):
 
         self._init_ui()
         self._load_from_settings()
+
+    def showEvent(self, event) -> None:
+        """Скрывает диалог от screen capture при показе."""
+        super().showEvent(event)
+        try:
+            hwnd = int(self.winId())
+            ctypes.windll.user32.SetWindowDisplayAffinity(
+                hwnd, _WDA_EXCLUDEFROMCAPTURE
+            )
+            logger.info("Диалог настроек скрыт от screen capture")
+        except Exception as e:
+            # Некритично: диалог откроется, просто будет виден на записи
+            logger.warning("Не удалось скрыть диалог настроек: %s", e)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)

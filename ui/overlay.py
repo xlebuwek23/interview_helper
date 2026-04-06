@@ -1,8 +1,8 @@
 import ctypes
 import logging
 
-from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QFont, QMouseEvent
+from PyQt6.QtCore import Qt, QPoint, QSize, pyqtSignal
+from PyQt6.QtGui import QFont, QMouseEvent, QWheelEvent, QPainter, QColor, QPolygon
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -19,6 +19,103 @@ logger = logging.getLogger(__name__)
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
+class ResizeHandle(QWidget):
+    """Треугольная ручка для изменения размера окна (правый нижний угол)."""
+
+    HANDLE_SIZE = 16
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setFixedSize(self.HANDLE_SIZE, self.HANDLE_SIZE)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self._drag_start: QPoint | None = None
+        self._initial_size: QSize | None = None
+
+    def paintEvent(self, event) -> None:
+        """Рисует треугольник-индикатор."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(100, 100, 100, 180))
+        size = self.HANDLE_SIZE
+        painter.drawPolygon(QPolygon([
+            QPoint(size, 0),
+            QPoint(size, size),
+            QPoint(0, size),
+        ]))
+        painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint()
+            self._initial_size = self.parent().size()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self._drag_start
+            parent = self.parent()
+            new_w = max(self._initial_size.width() + delta.x(), parent.minimumWidth())
+            new_h = max(self._initial_size.height() + delta.y(), parent.minimumHeight())
+            parent.resize(new_w, new_h)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._drag_start is not None:
+            self._drag_start = None
+            self._initial_size = None
+            parent = self.parent()
+            parent._set_exclude_from_capture()
+            parent.size_changed.emit(parent.width(), parent.height())
+
+
+class QueryInput(QTextEdit):
+    """Поле ввода текста для ручного запроса. Enter отправляет, Shift+Enter — перенос строки."""
+
+    submitted = pyqtSignal(str)
+
+    def __init__(self, font: QFont, parent=None):
+        super().__init__(parent)
+        self.setFont(font)
+        self.setPlaceholderText("Введите запрос...")
+        self.setAcceptRichText(False)
+        self.setStyleSheet("""
+            QTextEdit {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 6px;
+            }
+        """)
+        self.document().contentsChanged.connect(self.updateGeometry)
+
+    def sizeHint(self) -> QSize:
+        """Автоподстройка высоты: от 1 до 3 строк."""
+        line_height = self.fontMetrics().lineSpacing()
+        margins = int(self.document().documentMargin()) * 2
+        line_count = min(max(self.document().lineCount(), 1), 3)
+        h = line_height * line_count + margins + 8
+        return QSize(self.width(), h)
+
+    def minimumSizeHint(self) -> QSize:
+        """Минимальная высота — 1 строка."""
+        line_height = self.fontMetrics().lineSpacing()
+        margins = int(self.document().documentMargin()) * 2
+        return QSize(50, line_height + margins + 8)
+
+    def keyPressEvent(self, event) -> None:
+        """Enter без Shift — отправить. Shift+Enter — перенос строки."""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)
+            else:
+                text = self.toPlainText().strip()
+                if text:
+                    self.submitted.emit(text)
+                    self.clear()
+        else:
+            super().keyPressEvent(event)
+
+
 class OverlayWindow(QWidget):
     """Overlay-окно поверх экрана, невидимое при screen share.
 
@@ -27,6 +124,9 @@ class OverlayWindow(QWidget):
     - Область интервьюера: последний распознанный текст (серый)
     - Область ответа: ответ LLM (белый), прокрутка
     """
+
+    size_changed = pyqtSignal(int, int)
+    manual_query_submitted = pyqtSignal(str)
 
     def __init__(
         self,
@@ -49,6 +149,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowOpacity(opacity)
         self.resize(width, height)
+        self.setMinimumSize(250, 200)
 
         if position_x is not None and position_y is not None:
             self.move(position_x, position_y)
@@ -86,6 +187,7 @@ class OverlayWindow(QWidget):
         self._error_label = QLabel("")
         self._error_label.setFont(QFont("Segoe UI", self._font_size - 3))
         self._error_label.setStyleSheet("color: #ff8800; padding: 2px 6px;")
+        self._error_label.setMaximumWidth(150)
         self._error_label.hide()
 
         self._settings_btn = QPushButton("\u2699")
@@ -161,6 +263,47 @@ class OverlayWindow(QWidget):
             }
         """)
         main_layout.addWidget(self._response_text, stretch=1)
+        self._response_text.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+
+        # === Поле ввода запроса ===
+        input_separator = QWidget()
+        input_separator.setFixedHeight(1)
+        input_separator.setStyleSheet("background-color: #444444;")
+        main_layout.addWidget(input_separator)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(4)
+
+        self._query_input = QueryInput(font, self)
+        self._query_input.submitted.connect(self._on_query_submitted)
+        input_row.addWidget(self._query_input, stretch=1)
+
+        self._send_btn = QPushButton("\u2192")
+        self._send_btn.setFixedSize(32, 32)
+        self._send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #444444;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #555555;
+            }
+        """)
+        self._send_btn.clicked.connect(self._on_send_btn_clicked)
+        input_row.addWidget(self._send_btn)
+
+        main_layout.addLayout(input_row)
+
+        # === Resize handle (правый нижний угол) ===
+        resize_row = QHBoxLayout()
+        resize_row.setContentsMargins(0, 0, 0, 0)
+        resize_row.addStretch()
+        resize_row.addWidget(ResizeHandle(self))
+        main_layout.addLayout(resize_row)
 
     def showEvent(self, event) -> None:
         """После показа окна — скрываем от screen capture."""
@@ -197,6 +340,18 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._drag_pos = None
 
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Перенаправляет скролл в область ответа, если курсор над ней.
+
+        Допущение: _response_text — прямой дочерний виджет OverlayWindow
+        (не обёрнут в промежуточный контейнер). Если обёртка появится —
+        нужно использовать mapTo/mapFrom для перевода координат.
+        """
+        if self._response_text.geometry().contains(event.position().toPoint()):
+            QApplication.sendEvent(self._response_text.viewport(), event)
+        else:
+            super().wheelEvent(event)
+
     # --- Публичные методы обновления UI ---
 
     def set_status(self, text: str, color: str = "#ff4444") -> None:
@@ -209,11 +364,16 @@ class OverlayWindow(QWidget):
         self._mode_label.setText(mode)
 
     def set_error(self, text: str) -> None:
-        """Показывает сообщение об ошибке в статус-баре."""
+        """Показывает сообщение об ошибке в статус-баре (обрезает с …, тултип — полный текст)."""
         if text:
-            self._error_label.setText(text)
+            self._error_label.setToolTip(text)
+            elided = self._error_label.fontMetrics().elidedText(
+                text, Qt.TextElideMode.ElideRight, self._error_label.maximumWidth()
+            )
+            self._error_label.setText(elided)
             self._error_label.show()
         else:
+            self._error_label.setToolTip("")
             self._error_label.hide()
 
     def set_interviewer_text(self, text: str) -> None:
@@ -244,6 +404,17 @@ class OverlayWindow(QWidget):
         """Возвращает текущую позицию окна для сохранения."""
         pos = self.pos()
         return pos.x(), pos.y()
+
+    def _on_query_submitted(self, text: str) -> None:
+        """Вызывается из QueryInput при Enter."""
+        self.manual_query_submitted.emit(text)
+
+    def _on_send_btn_clicked(self) -> None:
+        """Кнопка → — отправить текст из поля ввода."""
+        text = self._query_input.toPlainText().strip()
+        if text:
+            self.manual_query_submitted.emit(text)
+            self._query_input.clear()
 
     def _on_close(self) -> None:
         """Закрытие приложения через кнопку ✕."""

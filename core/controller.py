@@ -87,6 +87,10 @@ class Controller(QObject):
         self._hotkey_manager.signals.mode_toggle.connect(self._on_mode_toggle)
         self._hotkey_manager.signals.show_hide.connect(self._on_show_hide)
 
+        # Resize handle → сохранение размера
+        self.overlay.size_changed.connect(self._on_size_changed)
+        self.overlay.manual_query_submitted.connect(self._on_manual_query)
+
     def start(self) -> None:
         """Запускает все модули."""
         logger.info("Controller: запуск всех модулей")
@@ -256,6 +260,26 @@ class Controller(QObject):
         self.overlay.set_status(text, color)
         self.overlay.set_mode(self._mode.value.upper())
         self.overlay.set_error("")
+
+    def _on_size_changed(self, width: int, height: int) -> None:
+        """Сохраняет новый размер окна в settings.json."""
+        self.settings["ui"]["width"] = width
+        self.settings["ui"]["height"] = height
+        save_settings(self.settings)
+        logger.info("Размер окна сохранён: %dx%d", width, height)
+
+    def _on_manual_query(self, text: str) -> None:
+        """Отправляет вручную введённый текст в LLM."""
+        if self._state == AppState.PROCESSING:
+            logger.debug("Ручной запрос проигнорирован: состояние PROCESSING")
+            return
+        logger.info("Ручной запрос (%d симв.): %s", len(text), text[:80])
+        self.overlay.clear_response()
+        self._set_state(AppState.PROCESSING)
+        self._llm_queue.put(text)
+        # Буфер речи не очищаем: параллельная речь продолжает копиться.
+        # Пока state == PROCESSING, _on_final_result() молча игнорирует
+        # новые результаты STT — это ожидаемое поведение.
 
     def open_settings(self) -> None:
         """Открывает диалог настроек (вызывается из overlay)."""
